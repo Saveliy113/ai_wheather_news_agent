@@ -6,8 +6,45 @@ from langchain.chat_models import init_chat_model
 from langchain_core.prompts import (
     ChatPromptTemplate,
     SystemMessagePromptTemplate,
-    HumanMessagePromptTemplate
+    HumanMessagePromptTemplate,
+    MessagesPlaceholder
 )
+# Custom ConversationBufferMemory implementation
+from langchain_core.messages import HumanMessage, AIMessage
+from typing import List
+
+
+class ConversationBufferMemory:
+    """
+    Simple conversation memory implementation.
+    Stores conversation history for multi-turn conversations.
+    """
+    def __init__(self, memory_key="chat_history", return_messages=True, input_key="input", output_key="output"):
+        self.memory_key = memory_key
+        self.return_messages = return_messages
+        self.input_key = input_key
+        self.output_key = output_key
+        self.chat_history: List = []
+    
+    def load_memory_variables(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
+        """Load conversation history."""
+        return {self.memory_key: self.chat_history}
+    
+    def save_context(self, inputs: Dict[str, Any], outputs: Dict[str, Any]):
+        """Save user input and AI response to memory."""
+        user_input = inputs.get(self.input_key, inputs.get("user_question", ""))
+        ai_output = outputs.get(self.output_key, outputs.get("response", ""))
+        
+        if user_input:
+            self.chat_history.append(HumanMessage(content=str(user_input)))
+        if ai_output:
+            self.chat_history.append(AIMessage(content=str(ai_output)))
+    
+    def clear(self):
+        """Clear conversation history."""
+        self.chat_history = []
+
+
 from mcp_config.weather_mcp import WeatherMCP
 from mcp_config.news_mcp import NewsMCP
 
@@ -26,13 +63,23 @@ class Orchestrator:
         # Initialize MCP servers
         self.weather_mcp = WeatherMCP()
         self.news_mcp = NewsMCP()
+        
+        # Initialize conversation memory for multi-turn conversations
+        self.memory = ConversationBufferMemory(
+            memory_key="chat_history",
+            return_messages=True,
+            input_key="user_question",
+            output_key="response"
+        )
 
-        # Prompt for Intent Agent
+        # Prompt for Intent Agent with conversation history support
         self.intent_prompt = ChatPromptTemplate.from_messages([
             SystemMessagePromptTemplate.from_template(
                 "You are an assistant that classifies user queries about weather and news. "
+                "You have access to conversation history to understand follow-up questions. "
                 "Return ONLY valid JSON, no markdown, no code blocks, no explanations. "
                 "IMPORTANT: "
+                "- Use conversation history to understand follow-up questions. If user asks 'and tomorrow?' or 'what about that?', use previous context. "
                 "- If the query is NOT about weather or news (e.g., asking about cars, recipes, general questions), set intent to 'unknown'. "
                 "- 'location' is ONLY for weather queries (geographic places like cities, countries: 'Paris', 'New York', 'Almaty'). "
                 "- 'topic' is ONLY for news queries (what the news is about: 'Russia', 'technology', 'sports', 'politics'). "
@@ -42,15 +89,16 @@ class Orchestrator:
                 "Examples: "
                 "- 'weather in Paris' -> intent: 'weather', location: 'Paris', topic: null "
                 "- 'news about Russia' -> intent: 'news', location: null, topic: 'Russia' "
+                "- 'and tomorrow?' (after weather query) -> intent: 'weather', location: from previous context, topic: null, day_index: 1 "
                 "- 'Can you recommend me a car?' -> intent: 'unknown', location: null, topic: null "
-                "- 'What is 2+2?' -> intent: 'unknown', location: null, topic: null "
                 "JSON format: "
                 '{{"intent": "weather" | "news" | "both" | "unknown", "location": "string or null", "topic": "string or null", "time": "string or null", "day_index": number (0-6) or null}}'
             ),
+            MessagesPlaceholder(variable_name="chat_history"),
             HumanMessagePromptTemplate.from_template("{user_input}")
         ])
         
-        # Prompt for Response Generation
+        # Prompt for Response Generation with conversation history
         self.response_prompt = ChatPromptTemplate.from_messages([
             SystemMessagePromptTemplate.from_template(
                 "You are a helpful assistant that provides clear, natural responses about weather and news ONLY. "
@@ -58,6 +106,8 @@ class Orchestrator:
                 "'I'm a specialized assistant that provides information only about weather and news. I cannot answer questions about other topics. "
                 "Please ask me about weather conditions or news information.' "
                 "Based on the user's question and the data provided, give a direct, conversational answer that directly addresses what they asked. "
+                "You have access to conversation history, so you can understand follow-up questions and references to previous topics. "
+                "If the user asks a follow-up question (like 'what about tomorrow?' or 'show me news about that'), use the conversation history to understand the context. "
                 "Be specific and use the actual data values from the provided data. "
                 "For weather: If the user asks a yes/no question (like 'Will it rain?'), answer directly with yes/no and then provide details. "
                 "If asking about precipitation/rain, check the 'precipitation' field in the data. "
@@ -67,6 +117,7 @@ class Orchestrator:
                 "ALWAYS include clickable links to the original articles using markdown format: [Article Title](url). "
                 "Each article mentioned must have its corresponding URL link."
             ),
+            MessagesPlaceholder(variable_name="chat_history"),
             HumanMessagePromptTemplate.from_template(
                 "User question: {user_question}\n\n"
                 "Data: {data}\n\n"
@@ -85,16 +136,23 @@ class Orchestrator:
             Dictionary with intent, location, topic, and time fields
         """
         try:
-            # Step 1: Create messages from prompt template
-            messages = self.intent_prompt.format_messages(user_input=user_input)
+            # Step 1: Load conversation history for intent detection
+            memory_variables = self.memory.load_memory_variables({})
+            chat_history = memory_variables.get("chat_history", [])
+            
+            # Step 2: Create messages from prompt template with conversation history
+            messages = self.intent_prompt.format_messages(
+                chat_history=chat_history,
+                user_input=user_input
+            )
 
-            # Step 2: Call LLM using invoke() method
+            # Step 3: Call LLM using invoke() method
             response = self.llm.invoke(messages)
 
-            # Step 3: Get response text (should be pure JSON)
+            # Step 4: Get response text (should be pure JSON)
             response_text = response.content.strip()
             
-            # Step 4: Parse JSON
+            # Step 5: Parse JSON
             intent_data = json.loads(response_text)
             
             # Step 5: Handle queries using MCP servers
@@ -116,7 +174,7 @@ class Orchestrator:
             
             # Handle unknown/unrelated queries - return immediately without processing
             if intent == "unknown":
-                result["response"] = (
+                response_text = (
                     "I'm a specialized assistant that provides information **only** about weather and news. "
                     "I cannot answer questions about other topics.\n\n"
                     "Please ask me about:\n"
@@ -124,7 +182,15 @@ class Orchestrator:
                     "• **News**: Latest headlines or news about specific topics (e.g., 'Show me news about technology' or 'What's the news about Russia?')\n\n"
                     "How can I help you with weather or news information?"
                 )
+                result["response"] = response_text
                 result["success"] = True
+                
+                # Save to memory even for unknown queries to maintain context
+                self.memory.save_context(
+                    {"user_question": user_input},
+                    {"response": response_text}
+                )
+                
                 return result
             
             # Handle weather queries
@@ -154,13 +220,33 @@ class Orchestrator:
                 response_text = self._generate_combined_response(user_input, weather_result, news_result)
                 result["response"] = response_text
             # Generate response for weather only
-            elif intent == "weather" and weather_result and weather_result.get("success"):
-                response_text = self._generate_weather_response(user_input, weather_result)
-                result["response"] = response_text
+            elif intent == "weather":
+                if weather_result and weather_result.get("success"):
+                    response_text = self._generate_weather_response(user_input, weather_result)
+                    result["response"] = response_text
+                else:
+                    # Handle weather query without location or failed fetch
+                    error_msg = weather_result.get("error", "Please specify a location for weather information.") if weather_result else "Please specify a location for weather information."
+                    result["response"] = f"❌ {error_msg}"
+                    # Still save to memory for context
+                    self.memory.save_context(
+                        {"user_question": user_input},
+                        {"response": result["response"]}
+                    )
             # Generate response for news only
-            elif intent == "news" and news_result and news_result.get("success"):
-                response_text = self._generate_news_response(user_input, news_result)
-                result["response"] = response_text
+            elif intent == "news":
+                if news_result and news_result.get("success"):
+                    response_text = self._generate_news_response(user_input, news_result)
+                    result["response"] = response_text
+                else:
+                    # Handle news query without topic or failed fetch
+                    error_msg = news_result.get("error", "Unable to fetch news information.") if news_result else "Please specify a topic for news information."
+                    result["response"] = f"❌ {error_msg}"
+                    # Still save to memory for context
+                    self.memory.save_context(
+                        {"user_question": user_input},
+                        {"response": result["response"]}
+                    )
             
             return result
             
@@ -188,7 +274,7 @@ class Orchestrator:
     
     def _generate_weather_response(self, user_question: str, weather_data: Dict[str, Any]) -> str:
         """
-        Generate natural language response for weather queries using OpenAI.
+        Generate natural language response for weather queries using OpenAI with conversation memory.
         
         Args:
             user_question: Original user question
@@ -198,19 +284,33 @@ class Orchestrator:
             Natural language response string
         """
         try:
+            # Load conversation history from memory
+            memory_variables = self.memory.load_memory_variables({})
+            chat_history = memory_variables.get("chat_history", [])
+            
+            # Format messages with conversation history
             messages = self.response_prompt.format_messages(
+                chat_history=chat_history,
                 user_question=user_question,
                 data=json.dumps(weather_data, indent=2)
             )
             response = self.llm.invoke(messages)
-            return response.content.strip()
+            response_text = response.content.strip()
+            
+            # Save to memory
+            self.memory.save_context(
+                {"user_question": user_question},
+                {"response": response_text}
+            )
+            
+            return response_text
         except Exception as e:
             # Fallback to simple response if generation fails
             return f"Weather data retrieved, but failed to generate response: {str(e)}"
     
     def _generate_news_response(self, user_question: str, news_data: Dict[str, Any]) -> str:
         """
-        Generate natural language response for news queries using OpenAI.
+        Generate natural language response for news queries using OpenAI with conversation memory.
         
         Args:
             user_question: Original user question
@@ -220,12 +320,26 @@ class Orchestrator:
             Natural language response string
         """
         try:
+            # Load conversation history from memory
+            memory_variables = self.memory.load_memory_variables({})
+            chat_history = memory_variables.get("chat_history", [])
+            
+            # Format messages with conversation history
             messages = self.response_prompt.format_messages(
+                chat_history=chat_history,
                 user_question=user_question,
                 data=json.dumps(news_data, indent=2)
             )
             response = self.llm.invoke(messages)
-            return response.content.strip()
+            response_text = response.content.strip()
+            
+            # Save to memory
+            self.memory.save_context(
+                {"user_question": user_question},
+                {"response": response_text}
+            )
+            
+            return response_text
         except Exception as e:
             # Fallback to simple response if generation fails
             return f"News data retrieved, but failed to generate response: {str(e)}"
@@ -250,17 +364,19 @@ class Orchestrator:
             if news_data:
                 combined_data["news"] = news_data
             
-            # Update prompt for combined response
+            # Update prompt for combined response with conversation history
             combined_prompt = ChatPromptTemplate.from_messages([
                 SystemMessagePromptTemplate.from_template(
                     "You are a helpful assistant that provides clear, natural responses about weather and news. "
                     "The user asked about both weather and news. Provide a comprehensive response that includes both. "
+                    "You have access to conversation history, so you can understand follow-up questions and references to previous topics. "
                     "For weather: Be specific about temperature, conditions, precipitation if relevant. "
                     "For news: Summarize key headlines and topics naturally. "
                     "ALWAYS include clickable links to the original news articles using markdown format: [Article Title](url). "
                     "Each article mentioned must have its corresponding URL link. "
                     "Structure your response clearly, mentioning weather first, then news, or vice versa based on what makes sense."
                 ),
+                MessagesPlaceholder(variable_name="chat_history"),
                 HumanMessagePromptTemplate.from_template(
                     "User question: {user_question}\n\n"
                     "Data: {data}\n\n"
@@ -268,12 +384,25 @@ class Orchestrator:
                 )
             ])
             
+            # Load conversation history from memory
+            memory_variables = self.memory.load_memory_variables({})
+            chat_history = memory_variables.get("chat_history", [])
+            
             messages = combined_prompt.format_messages(
+                chat_history=chat_history,
                 user_question=user_question,
                 data=json.dumps(combined_data, indent=2)
             )
             response = self.llm.invoke(messages)
-            return response.content.strip()
+            response_text = response.content.strip()
+            
+            # Save to memory
+            self.memory.save_context(
+                {"user_question": user_question},
+                {"response": response_text}
+            )
+            
+            return response_text
         except Exception as e:
             # Fallback: format manually if generation fails
             response_parts = []
@@ -299,3 +428,7 @@ class Orchestrator:
                 response_parts.append(f"❌ News: {news_data.get('error', 'Unable to fetch news')}\n")
             
             return "".join(response_parts) if response_parts else f"Failed to generate combined response: {str(e)}"
+    
+    def clear_memory(self):
+        """Clear conversation memory."""
+        self.memory.clear()
