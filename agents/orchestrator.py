@@ -63,7 +63,9 @@ class Orchestrator:
                 "If asking about precipitation/rain, check the 'precipitation' field in the data. "
                 "If asking about temperature, use the temperature values from the data. "
                 "Match the time period in your response to what the user asked about (today, tomorrow, etc.). "
-                "For news: Summarize the articles naturally, mention key headlines and topics. If articles are provided, reference them in your response."
+                "For news: Summarize the articles naturally, mention key headlines and topics. "
+                "ALWAYS include clickable links to the original articles using markdown format: [Article Title](url). "
+                "Each article mentioned must have its corresponding URL link."
             ),
             HumanMessagePromptTemplate.from_template(
                 "User question: {user_question}\n\n"
@@ -255,6 +257,8 @@ class Orchestrator:
                     "The user asked about both weather and news. Provide a comprehensive response that includes both. "
                     "For weather: Be specific about temperature, conditions, precipitation if relevant. "
                     "For news: Summarize key headlines and topics naturally. "
+                    "ALWAYS include clickable links to the original news articles using markdown format: [Article Title](url). "
+                    "Each article mentioned must have its corresponding URL link. "
                     "Structure your response clearly, mentioning weather first, then news, or vice versa based on what makes sense."
                 ),
                 HumanMessagePromptTemplate.from_template(
@@ -285,7 +289,12 @@ class Orchestrator:
                 response_parts.append("📰 **News Information:**\n")
                 articles = news_data.get("articles", [])
                 for i, article in enumerate(articles[:3], 1):
-                    response_parts.append(f"{i}. {article.get('title', 'No title')}\n")
+                    title = article.get('title', 'No title')
+                    url = article.get('url', '')
+                    if url:
+                        response_parts.append(f"{i}. [{title}]({url})\n")
+                    else:
+                        response_parts.append(f"{i}. {title}\n")
             elif news_data:
                 response_parts.append(f"❌ News: {news_data.get('error', 'Unable to fetch news')}\n")
             
