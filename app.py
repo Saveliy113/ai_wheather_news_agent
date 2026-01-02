@@ -40,27 +40,39 @@ if user_input:
     
     # Format response based on orchestrator result
     if result.get("success"):
-        intent = result.get("intent", "unknown")
-        location = result.get("location")
-        topic = result.get("topic")
-        time_ref = result.get("time")
-        
-        # Build response message
-        response_parts = [
-            f"🤖 **Intent Detected**: {intent.upper()}\n\n"
-        ]
-        
-        if location:
-            response_parts.append(f"📍 **Location**: {location}\n")
-        if topic:
-            response_parts.append(f"📰 **Topic**: {topic}\n")
-        if time_ref:
-            response_parts.append(f"⏰ **Time**: {time_ref}\n")
-        
-        response_parts.append("\n---\n")
-        response_parts.append("_MCP servers will be connected next to fetch actual data._")
-        
-        response = "".join(response_parts)
+        # Use OpenAI-generated response if available
+        if result.get("response"):
+            response = result["response"]
+        else:
+            # Fallback: show basic info if no response generated
+            intent = result.get("intent", "unknown")
+            location = result.get("location")
+            topic = result.get("topic")
+            time_ref = result.get("time")
+            weather_data = result.get("weather_data")
+            news_data = result.get("news_data")
+            
+            response_parts = []
+            
+            # Handle errors
+            if weather_data and not weather_data.get("success"):
+                error = weather_data.get("error", "Unknown error")
+                response_parts.append(f"❌ **Weather Error**: {error}\n\n")
+            
+            if news_data and not news_data.get("success"):
+                error = news_data.get("error", "Unknown error")
+                response_parts.append(f"❌ **News Error**: {error}\n\n")
+            
+            if not response_parts:
+                response_parts.append(f"🤖 **Intent Detected**: {intent.upper()}\n\n")
+                if location:
+                    response_parts.append(f"📍 **Location**: {location}\n")
+                if topic:
+                    response_parts.append(f"📰 **Topic**: {topic}\n")
+                if time_ref:
+                    response_parts.append(f"⏰ **Time**: {time_ref}\n")
+            
+            response = "".join(response_parts) if response_parts else "Processing your request..."
     else:
         # Error case
         error_msg = result.get("error", "Unknown error occurred")
