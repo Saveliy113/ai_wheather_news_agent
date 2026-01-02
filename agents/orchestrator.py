@@ -32,9 +32,16 @@ class Orchestrator:
             SystemMessagePromptTemplate.from_template(
                 "You are an assistant that classifies user queries about weather and news. "
                 "Return ONLY valid JSON, no markdown, no code blocks, no explanations. "
-                "For weather queries, also parse the time reference into a day_index. "
+                "IMPORTANT: "
+                "- 'location' is ONLY for weather queries (geographic places like cities, countries: 'Paris', 'New York', 'Almaty'). "
+                "- 'topic' is ONLY for news queries (what the news is about: 'Russia', 'technology', 'sports', 'politics'). "
+                "- For weather queries, also parse the time reference into a day_index. "
                 "Day index: 0 = today/now, 1 = tomorrow, 2 = day after tomorrow, 3 = in 3 days, etc. (max 6). "
                 "If time is not specified or unclear, day_index should be null. "
+                "Examples: "
+                "- 'weather in Paris' -> location: 'Paris', topic: null "
+                "- 'news about Russia' -> location: null, topic: 'Russia' "
+                "- 'news about technology' -> location: null, topic: 'technology' "
                 "JSON format: "
                 '{{"intent": "weather" | "news" | "both", "location": "string or null", "topic": "string or null", "time": "string or null", "day_index": number (0-6) or null}}'
             ),
@@ -47,14 +54,15 @@ class Orchestrator:
                 "You are a helpful assistant that provides clear, natural responses about weather and news. "
                 "Based on the user's question and the data provided, give a direct, conversational answer that directly addresses what they asked. "
                 "Be specific and use the actual data values from the provided data. "
-                "If the user asks a yes/no question (like 'Will it rain?'), answer directly with yes/no and then provide details. "
+                "For weather: If the user asks a yes/no question (like 'Will it rain?'), answer directly with yes/no and then provide details. "
                 "If asking about precipitation/rain, check the 'precipitation' field in the data. "
                 "If asking about temperature, use the temperature values from the data. "
-                "Match the time period in your response to what the user asked about (today, tomorrow, etc.)."
+                "Match the time period in your response to what the user asked about (today, tomorrow, etc.). "
+                "For news: Summarize the articles naturally, mention key headlines and topics. If articles are provided, reference them in your response."
             ),
             HumanMessagePromptTemplate.from_template(
                 "User question: {user_question}\n\n"
-                "Weather data: {data}\n\n"
+                "Data: {data}\n\n"
                 "Provide a natural, conversational response that directly answers the user's question:"
             )
         ])
@@ -98,7 +106,7 @@ class Orchestrator:
                 "success": True,
                 "user_question": user_input
             }
-            
+
             # Handle weather queries
             if intent in ["weather", "both"] and location:
                 weather_result = self.weather_mcp.get_weather(location, day_index=day_index)
@@ -111,7 +119,10 @@ class Orchestrator:
             
             # Handle news queries
             if intent in ["news", "both"]:
-                news_result = self.news_mcp.get_news(topic=topic)
+                # Use topic for news search (not location)
+                # If topic is None but location exists for news query, use location as topic
+                news_topic = topic if topic else (location if intent == "news" else None)
+                news_result = self.news_mcp.get_news(topic=news_topic)
                 result["news_data"] = news_result
                 
                 # Generate natural language response using OpenAI
