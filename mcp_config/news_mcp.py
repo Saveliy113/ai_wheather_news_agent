@@ -2,6 +2,7 @@
 import requests
 import os
 from typing import Dict, Any, Optional
+from requests.exceptions import RequestException, Timeout, ConnectionError, HTTPError
 
 
 class NewsMCP:
@@ -39,7 +40,8 @@ class NewsMCP:
             if not self.api_key:
                 return {
                     "success": False,
-                    "error": "GNews API key not configured. Set GNEWS_API_KEY environment variable or pass api_key parameter."
+                    "error": "GNews API key not configured. Set GNEWS_API_KEY environment variable or pass api_key parameter.",
+                    "error_type": "configuration_error"
                 }
             
             # Step 2: Determine API endpoint and parameters
@@ -66,6 +68,7 @@ class NewsMCP:
             response = requests.get(url, params=params, timeout=10)
             response.raise_for_status()
             data = response.json()
+            
             # Step 4: Format articles
             articles = data.get("articles", [])
             print(f"Articles: {articles}")
@@ -73,7 +76,8 @@ class NewsMCP:
             if not articles:
                 return {
                     "success": False,
-                    "error": f"No news articles found for topic: {topic}" if topic else "No news articles found"
+                    "error": f"No news articles found for topic: {topic}" if topic else "No news articles found",
+                    "error_type": "no_articles_found"
                 }
             
             # Step 5: Format and return result
@@ -93,13 +97,32 @@ class NewsMCP:
                 "articles": formatted_articles
             }
             
-        except requests.exceptions.RequestException as e:
+        except (ConnectionError, Timeout) as e:
             return {
                 "success": False,
-                "error": f"Failed to fetch news: {str(e)}"
+                "error": "Sorry, but I am not able to provide you information due to connection problems. Please check your internet connection and try again.",
+                "error_type": "connection_error",
+                "details": str(e)
+            }
+        except HTTPError as e:
+            status_code = e.response.status_code if hasattr(e, 'response') and e.response else 'unknown'
+            return {
+                "success": False,
+                "error": f"News service returned an error (HTTP {status_code}). Please try again later.",
+                "error_type": "http_error",
+                "details": str(e)
+            }
+        except RequestException as e:
+            return {
+                "success": False,
+                "error": "Failed to fetch news data from external service. Please try again later.",
+                "error_type": "api_error",
+                "details": str(e)
             }
         except Exception as e:
             return {
                 "success": False,
-                "error": f"Unexpected error: {str(e)}"
+                "error": "An unexpected error occurred while fetching news data. Please try again later.",
+                "error_type": "unexpected_error",
+                "details": str(e)
             }

@@ -4,6 +4,35 @@ from agents.orchestrator import Orchestrator
 from dotenv import load_dotenv
 load_dotenv()
 
+
+def _is_connection_error(error_msg: str) -> bool:
+    """
+    Check if an error message indicates a connection-related error.
+    
+    Args:
+        error_msg: Error message to check
+        
+    Returns:
+        True if it's a connection error, False otherwise
+    """
+    if not error_msg:
+        return False
+    
+    error_lower = error_msg.lower()
+    connection_keywords = [
+        "connection",
+        "timeout",
+        "network",
+        "unable to connect",
+        "failed to connect",
+        "connectionerror",
+        "connection timed out",
+        "no internet",
+        "internet connection"
+    ]
+    return any(keyword in error_lower for keyword in connection_keywords)
+
+
 st.set_page_config(
     page_title="Weather & News AI",
     page_icon="🌦️",
@@ -57,11 +86,21 @@ if user_input:
             # Handle errors
             if weather_data and not weather_data.get("success"):
                 error = weather_data.get("error", "Unknown error")
-                response_parts.append(f"❌ **Weather Error**: {error}\n\n")
+                error_type = weather_data.get("error_type", "")
+                # Check if it's a connection-related error
+                if error_type == "connection_error" or _is_connection_error(error):
+                    response_parts.append("Sorry, but I am not able to provide you information due to connection problems. Please check your internet connection and try again.\n\n")
+                else:
+                    response_parts.append(f"❌ **Weather Error**: {error}\n\n")
             
             if news_data and not news_data.get("success"):
                 error = news_data.get("error", "Unknown error")
-                response_parts.append(f"❌ **News Error**: {error}\n\n")
+                error_type = news_data.get("error_type", "")
+                # Check if it's a connection-related error
+                if error_type == "connection_error" or _is_connection_error(error):
+                    response_parts.append("Sorry, but I am not able to provide you information due to connection problems. Please check your internet connection and try again.\n\n")
+                else:
+                    response_parts.append(f"❌ **News Error**: {error}\n\n")
             
             if not response_parts:
                 response_parts.append(f"🤖 **Intent Detected**: {intent.upper()}\n\n")

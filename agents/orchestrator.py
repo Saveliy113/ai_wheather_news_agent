@@ -466,7 +466,13 @@ class Orchestrator:
                 else:
                     # Handle weather query without location or failed fetch
                     error_msg = weather_result.get("error", "Please specify a location for weather information.") if weather_result else "Please specify a location for weather information."
-                    result["response"] = f"❌ {error_msg}"
+                    error_type = weather_result.get("error_type", "") if weather_result else ""
+                    
+                    # Check if it's a connection-related error and return user-friendly message
+                    if error_type == "connection_error" or self._is_connection_error(error_msg):
+                        result["response"] = "Sorry, but I am not able to provide you information due to connection problems. Please check your internet connection and try again."
+                    else:
+                        result["response"] = f"❌ {error_msg}"
                     # Still save to memory for context
                     self.memory.save_context(
                         {"user_question": user_input},
@@ -480,7 +486,13 @@ class Orchestrator:
                 else:
                     # Handle news query without topic or failed fetch
                     error_msg = news_result.get("error", "Unable to fetch news information.") if news_result else "Please specify a topic for news information."
-                    result["response"] = f"❌ {error_msg}"
+                    error_type = news_result.get("error_type", "") if news_result else ""
+                    
+                    # Check if it's a connection-related error and return user-friendly message
+                    if error_type == "connection_error" or self._is_connection_error(error_msg):
+                        result["response"] = "Sorry, but I am not able to provide you information due to connection problems. Please check your internet connection and try again."
+                    else:
+                        result["response"] = f"❌ {error_msg}"
                     # Still save to memory for context
                     self.memory.save_context(
                         {"user_question": user_input},
@@ -502,13 +514,17 @@ class Orchestrator:
             }
         except Exception as e:
             # Any other error
+            error_msg = str(e)
+            # Check if it's a connection-related error
+            if "connection" in error_msg.lower() or "timeout" in error_msg.lower() or "ConnectionError" in str(type(e)):
+                error_msg = "Sorry, but I am not able to provide you information due to connection problems. Please check your internet connection and try again."
             return {
                 "intent": "unknown",
                 "location": None,
                 "topic": None,
                 "time": None,
                 "success": False,
-                "error": f"Error: {str(e)}"
+                "error": error_msg
             }
     
     def _generate_weather_response(self, user_question: str, weather_data: Dict[str, Any]) -> str:
@@ -546,6 +562,33 @@ class Orchestrator:
         except Exception as e:
             # Fallback to simple response if generation fails
             return f"Weather data retrieved, but failed to generate response: {str(e)}"
+    
+    def _is_connection_error(self, error_msg: str) -> bool:
+        """
+        Check if an error message indicates a connection-related error.
+        
+        Args:
+            error_msg: Error message to check
+            
+        Returns:
+            True if it's a connection error, False otherwise
+        """
+        if not error_msg:
+            return False
+        
+        error_lower = error_msg.lower()
+        connection_keywords = [
+            "connection",
+            "timeout",
+            "network",
+            "unable to connect",
+            "failed to connect",
+            "connectionerror",
+            "connection timed out",
+            "no internet",
+            "internet connection"
+        ]
+        return any(keyword in error_lower for keyword in connection_keywords)
     
     def _generate_news_response(self, user_question: str, news_data: Dict[str, Any]) -> str:
         """
