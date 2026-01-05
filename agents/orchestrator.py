@@ -1,6 +1,7 @@
 import json
+import re
 
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from dotenv import load_dotenv
 from langchain.chat_models import init_chat_model
 from langchain_core.prompts import (
@@ -11,7 +12,6 @@ from langchain_core.prompts import (
 )
 # Custom ConversationBufferMemory implementation
 from langchain_core.messages import HumanMessage, AIMessage
-from typing import List
 
 
 class ConversationBufferMemory:
@@ -75,24 +75,37 @@ class Orchestrator:
         # Prompt for Intent Agent with conversation history support
         self.intent_prompt = ChatPromptTemplate.from_messages([
             SystemMessagePromptTemplate.from_template(
-                "You are an assistant that classifies user queries about weather and news. "
+                "You are a JSON-only classification assistant. Your ONLY job is to classify user queries and return JSON. "
                 "You have access to conversation history to understand follow-up questions. "
-                "Return ONLY valid JSON, no markdown, no code blocks, no explanations. "
+                "CRITICAL RULES: "
+                "1. You MUST return ONLY valid JSON. Nothing else. "
+                "2. Do NOT generate weather data, news articles, or any final responses. "
+                "3. Do NOT include explanations, markdown, code blocks, or any text outside the JSON. "
+                "4. Your response must be a single JSON object starting with {{ and ending with }}. "
+                "5. You are ONLY classifying intent - you are NOT answering the question. "
                 "IMPORTANT: "
                 "- Use conversation history to understand follow-up questions. If user asks 'and tomorrow?' or 'what about that?', use previous context. "
-                "- If the query is NOT about weather or news (e.g., asking about cars, recipes, general questions), set intent to 'unknown'. "
+                "- If user says polite responses (like 'thanks', 'ok', 'thank you', 'got it'), set intent to 'polite' - these don't need weather/news data. "
+                "- If user says initial greetings (like 'hello', 'hi', 'hey', 'good morning', 'good afternoon'), set intent to 'greeting' - keep conversation friendly. "
+                "- If user says conversational reactions, comments, or farewells (like 'goodbye', 'bye', 'nice', 'cool', 'great', 'see you', 'have a good day'), set intent to 'conversational' - these need natural LLM responses. "
+                "- If the query is a QUESTION about topics NOT related to weather or news (e.g., 'Can you recommend me a car?', 'What is Python?', 'How to cook pasta?'), set intent to 'unknown'. "
+                "- Greetings, polite conversation, and conversational reactions should be 'greeting', 'polite', or 'conversational', NOT 'unknown'. "
                 "- 'location' is ONLY for weather queries (geographic places like cities, countries: 'Paris', 'New York', 'Almaty'). "
                 "- 'topic' is ONLY for news queries (what the news is about: 'Russia', 'technology', 'sports', 'politics'). "
                 "- For weather queries, also parse the time reference into a day_index. "
+                "- If location/topic is missing but intent is weather/news, use previous conversation context to fill it. "
                 "Day index: 0 = today/now, 1 = tomorrow, 2 = day after tomorrow, 3 = in 3 days, etc. (max 6). "
                 "If time is not specified or unclear, day_index should be null. "
                 "Examples: "
                 "- 'weather in Paris' -> intent: 'weather', location: 'Paris', topic: null "
                 "- 'news about Russia' -> intent: 'news', location: null, topic: 'Russia' "
                 "- 'and tomorrow?' (after weather query) -> intent: 'weather', location: from previous context, topic: null, day_index: 1 "
+                "- 'thanks' or 'ok' -> intent: 'polite', location: null, topic: null "
+                "- 'Hello' or 'Hi' -> intent: 'greeting', location: null, topic: null "
+                "- 'goodbye' or 'bye' or 'nice' -> intent: 'conversational', location: null, topic: null "
                 "- 'Can you recommend me a car?' -> intent: 'unknown', location: null, topic: null "
                 "JSON format: "
-                '{{"intent": "weather" | "news" | "both" | "unknown", "location": "string or null", "topic": "string or null", "time": "string or null", "day_index": number (0-6) or null}}'
+                '{{"intent": "weather" | "news" | "both" | "polite" | "greeting" | "conversational" | "unknown", "location": "string or null", "topic": "string or null", "time": "string or null", "day_index": number (0-6) or null}}'
             ),
             MessagesPlaceholder(variable_name="chat_history"),
             HumanMessagePromptTemplate.from_template("{user_input}")
@@ -124,7 +137,155 @@ class Orchestrator:
                 "Provide a natural, conversational response that directly answers the user's question:"
             )
         ])
+        
+        # Prompt for Conversational Responses (greetings, reactions, farewells)
+        self.conversational_prompt = ChatPromptTemplate.from_messages([
+            SystemMessagePromptTemplate.from_template(
+                "You are a friendly and helpful assistant that specializes in weather and news information. "
+                "The user is having a conversational interaction with you (greeting, reaction, comment, or farewell). "
+                "Respond naturally and appropriately to what they said. "
+                "Keep your response brief, friendly, and conversational. "
+                "If it's a greeting, welcome them and briefly mention you can help with weather and news. "
+                "If it's a farewell (like 'goodbye', 'bye'), respond politely and wish them well. "
+                "If it's a reaction or comment (like 'nice', 'cool', 'great'), respond naturally and keep the conversation going. "
+                "You have access to conversation history, so you can understand the context of the conversation. "
+                "Be warm, friendly, and human-like in your responses."
+            ),
+            MessagesPlaceholder(variable_name="chat_history"),
+            HumanMessagePromptTemplate.from_template("{user_input}")
+        ])
 
+    def _extract_json_from_response(self, response_text: str) -> Dict[str, Any]:
+        """
+        Extract JSON from LLM response, handling markdown code blocks and extra text.
+        
+        Args:
+            response_text: Raw response from LLM
+            
+        Returns:
+            Parsed JSON dictionary
+            
+        Raises:
+            ValueError: If JSON cannot be extracted or parsed
+        """
+        # Try to parse as-is first
+        try:
+            return json.loads(response_text)
+        except json.JSONDecodeError:
+            pass
+        
+        # Try to extract JSON from markdown code blocks
+        import re
+        # Look for JSON in ```json ... ``` or ``` ... ``` blocks
+        json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', response_text, re.DOTALL)
+        if json_match:
+            try:
+                return json.loads(json_match.group(1))
+            except json.JSONDecodeError:
+                pass
+        
+        # Try to find JSON object in the text
+        json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', response_text, re.DOTALL)
+        if json_match:
+            try:
+                return json.loads(json_match.group(0))
+            except json.JSONDecodeError:
+                pass
+        
+        # If all else fails, raise an error with the raw response
+        raise ValueError(f"Failed to extract JSON from response: {response_text[:200]}...")
+    
+    def _infer_intent_from_response(self, response_text: str, user_input: str, chat_history: List) -> Optional[Dict[str, Any]]:
+        """
+        Fallback: Try to infer intent from LLM response when JSON parsing fails.
+        This handles cases where LLM ignores JSON format requirement.
+        
+        Args:
+            response_text: Raw response from LLM
+            user_input: Original user input
+            chat_history: Conversation history
+            
+        Returns:
+            Inferred intent data dictionary or None if inference fails
+        """
+        response_lower = response_text.lower()
+        user_lower = user_input.lower()
+        
+        # Check if response contains weather-related content
+        weather_keywords = ["temperature", "weather", "rain", "snow", "cloudy", "sunny", "humidity", "wind", "forecast"]
+        news_keywords = ["news", "article", "headline", "published", "source"]
+        
+        has_weather = any(keyword in response_lower for keyword in weather_keywords)
+        has_news = any(keyword in response_lower for keyword in news_keywords)
+        
+        # Try to extract location from response or user input
+        location = None
+        # Look for common location patterns
+        location_patterns = [
+            r'\bin\s+([A-Z][a-zA-Z\s]+?)(?:\s|,|\.|\?|$)',
+            r'([A-Z][a-zA-Z\s]+?)(?:\s*,?\s*Russia|\s*,?\s*USA|\s*,?\s*France)',
+        ]
+        for pattern in location_patterns:
+            match = re.search(pattern, response_text, re.IGNORECASE)
+            if match:
+                location = match.group(1).strip()
+                break
+        
+        # If no location in response, try user input
+        if not location:
+            for pattern in location_patterns:
+                match = re.search(pattern, user_input, re.IGNORECASE)
+                if match:
+                    location = match.group(1).strip()
+                    break
+        
+        # Try to extract location from conversation history
+        if not location:
+            for msg in reversed(chat_history):
+                if hasattr(msg, 'content') and isinstance(msg, HumanMessage):
+                    prev_content = msg.content
+                    match = re.search(r'weather\s+(?:in|at|for)\s+([A-Z][a-zA-Z\s]+?)(?:\?|$|\.|,)', prev_content, re.IGNORECASE)
+                    if match:
+                        location = match.group(1).strip()
+                        break
+        
+        # Determine intent
+        if has_weather and has_news:
+            intent = "both"
+        elif has_weather:
+            intent = "weather"
+        elif has_news:
+            intent = "news"
+        else:
+            # Check user input for keywords
+            if any(kw in user_lower for kw in ["weather", "temperature", "rain", "forecast"]):
+                intent = "weather"
+            elif any(kw in user_lower for kw in ["news", "headline", "article"]):
+                intent = "news"
+            elif any(kw in user_lower for kw in ["hello", "hi", "hey"]):
+                intent = "greeting"
+            elif any(kw in user_lower for kw in ["thanks", "thank you", "ok"]):
+                intent = "polite"
+            elif any(kw in user_lower for kw in ["goodbye", "bye", "see you", "nice", "cool", "great", "awesome"]):
+                intent = "conversational"
+            else:
+                return None  # Cannot infer intent
+        
+        # Try to extract day_index from user input
+        day_index = None
+        if "tomorrow" in user_lower:
+            day_index = 1
+        elif "today" in user_lower or "now" in user_lower:
+            day_index = 0
+        
+        return {
+            "intent": intent,
+            "location": location,
+            "topic": None,  # Hard to infer topic from response
+            "time": None,
+            "day_index": day_index
+        }
+    
     def run(self, user_input: str) -> Dict[str, Any]:
         """
         Process user input and return parsed intent classification.
@@ -149,13 +310,32 @@ class Orchestrator:
             # Step 3: Call LLM using invoke() method
             response = self.llm.invoke(messages)
 
-            # Step 4: Get response text (should be pure JSON)
+            # Step 4: Get response text and extract JSON
             response_text = response.content.strip()
             
-            # Step 5: Parse JSON
-            intent_data = json.loads(response_text)
+            # Step 5: Extract JSON from response (handle markdown code blocks or extra text)
+            try:
+                intent_data = self._extract_json_from_response(response_text)
+            except ValueError as e:
+                # If JSON extraction fails, try to infer intent from the response
+                # This is a fallback when LLM ignores JSON format requirement
+                intent_data = self._infer_intent_from_response(response_text, user_input, chat_history)
+                if not intent_data:
+                    # If inference also fails, return error
+                    result = {
+                        "intent": "unknown",
+                        "location": None,
+                        "topic": None,
+                        "time": None,
+                        "day_index": None,
+                        "success": False,
+                        "error": f"Failed to parse intent classification. {str(e)}",
+                        "raw_response": response_text[:500],  # Store first 500 chars for debugging
+                        "user_question": user_input
+                    }
+                    return result
             
-            # Step 5: Handle queries using MCP servers
+            # Step 6: Handle queries using MCP servers
             intent = intent_data.get("intent", "unknown")
             location = intent_data.get("location")
             topic = intent_data.get("topic")
@@ -171,6 +351,32 @@ class Orchestrator:
                 "success": True,
                 "user_question": user_input
             }
+            
+            # Handle conversational intents (greetings, reactions, farewells) - use LLM for natural responses
+            if intent in ["greeting", "polite", "conversational"]:
+                # Load conversation history
+                memory_variables = self.memory.load_memory_variables({})
+                chat_history = memory_variables.get("chat_history", [])
+                
+                # Generate conversational response using LLM
+                messages = self.conversational_prompt.format_messages(
+                    chat_history=chat_history,
+                    user_input=user_input
+                )
+                
+                llm_response = self.llm.invoke(messages)
+                response_text = llm_response.content.strip()
+                
+                result["response"] = response_text
+                result["success"] = True
+                
+                # Save to memory
+                self.memory.save_context(
+                    {"user_question": user_input},
+                    {"response": response_text}
+                )
+                
+                return result
             
             # Handle unknown/unrelated queries - return immediately without processing
             if intent == "unknown":
@@ -196,19 +402,52 @@ class Orchestrator:
             # Handle weather queries
             weather_result = None
             if intent in ["weather", "both"]:
+                # If location is missing, try to extract from previous conversation
+                if not location:
+                    # Get previous intent data from memory to extract location
+                    memory_variables = self.memory.load_memory_variables({})
+                    chat_history = memory_variables.get("chat_history", [])
+                    # Look backwards through history for previous weather query with location
+                    for i in range(len(chat_history) - 1, -1, -1):
+                        msg = chat_history[i]
+                        if hasattr(msg, 'content') and isinstance(msg, HumanMessage):
+                            # Try to extract location from previous user message
+                            prev_content = msg.content
+                            # Look for "weather in [location]" pattern (case-insensitive)
+                            match = re.search(r'weather\s+(?:in|at|for)\s+([A-Z][a-zA-Z\s]+?)(?:\?|$|\.|,)', prev_content, re.IGNORECASE)
+                            if match:
+                                location = match.group(1).strip()
+                                break
+                
                 if location:
                     weather_result = self.weather_mcp.get_weather(location, day_index=day_index)
                     result["weather_data"] = weather_result
                 else:
-                    # Weather intent but no location
+                    # Weather intent but no location found - return helpful message
                     result["weather_data"] = {
                         "success": False,
-                        "error": "Please specify a location for weather information."
+                        "error": "Please specify a location for weather information (e.g., 'What's the weather in Paris?')."
                     }
             
             # Handle news queries
             news_result = None
             if intent in ["news", "both"]:
+                # If topic is missing, try to extract from previous conversation
+                if not topic:
+                    memory_variables = self.memory.load_memory_variables({})
+                    chat_history = memory_variables.get("chat_history", [])
+                    # Look backwards through history for previous news query with topic
+                    for i in range(len(chat_history) - 1, -1, -1):
+                        msg = chat_history[i]
+                        if hasattr(msg, 'content') and isinstance(msg, HumanMessage):
+                            prev_content = msg.content
+                            # Try to extract topic from previous user message
+                            # Look for "news about [topic]" pattern (case-insensitive)
+                            match = re.search(r'news\s+(?:about|on|for)\s+([a-zA-Z\s]+?)(?:\?|$|\.|,)', prev_content, re.IGNORECASE)
+                            if match:
+                                topic = match.group(1).strip()
+                                break
+                
                 # Use topic for news search (not location)
                 # If topic is None but location exists for news query, use location as topic
                 news_topic = topic if topic else (location if intent == "news" else None)
