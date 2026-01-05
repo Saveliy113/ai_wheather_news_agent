@@ -1,5 +1,8 @@
 # Weather & News AI Assistant
 
+🔗 **GitHub Repository**: [https://github.com/Saveliy113/ai_wheather_news_agent](#)  
+📹 **Demo Video**: [https://drive.google.com/file/d/13fpwZa0SLVjAaq1hq0RJOZn_BYhbjIUD/view?usp=sharing](#)
+
 A Python-based AI agent application built with Streamlit that answers user questions about current weather conditions and latest news. The application leverages agent orchestration patterns and Model Context Protocol (MCP) servers to integrate external data sources.
 
 ## How It Works
